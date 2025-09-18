@@ -1,114 +1,100 @@
-from flask import Flask, render_template, request
 import pandas as pd
-import joblib
-import torch
 import numpy as np
-from torch import nn
-import matplotlib
-matplotlib.use('Agg')  # Set non-interactive backend before importing pyplot
-import matplotlib.pyplot as plt
-import seaborn as sns
+import torch
+from flask import Flask, request, jsonify
+import pickle
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+import torch.nn as nn
 import os
 
+# Initialize Flask app
 app = Flask(__name__)
 
-# Load data and models
-df = pd.read_csv("Crop_recommendation.csv")
-rf_model = joblib.load("model/rf_model.pkl")
-scaler = joblib.load("model/scaler.pkl")
-label_encoder = joblib.load("model/label_encoder.pkl")
+# Define paths to model files in the models/ subdirectory
+MODEL_DIR = 'models'
+RF_MODEL_PATH = os.path.join(MODEL_DIR, 'rf_model.pkl')
+LSTM_MODEL_PATH = os.path.join(MODEL_DIR, 'lstm_model.pth')
+SCALER_PATH = os.path.join(MODEL_DIR, 'scaler.pkl')
+LABEL_ENCODER_PATH = os.path.join(MODEL_DIR, 'label_encoder.pkl')
 
-# Load LSTM model
-class LSTMClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, num_classes):
-        super(LSTMClassifier, self).__init__()
+# Load pre-trained models and preprocessing objects
+with open(RF_MODEL_PATH, 'rb') as f:
+    rf_model = pickle.load(f)
+with open(SCALER_PATH, 'rb') as f:
+    scaler = pickle.load(f)
+with open(LABEL_ENCODER_PATH, 'rb') as f:
+    label_encoder = pickle.load(f)
+
+# Define LSTM model class (must match training architecture)
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=7, hidden_size=64, num_layers=2, num_classes=22):
+        super(LSTMModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, num_classes)
-
+    
     def forward(self, x):
-        _, (h_n, _) = self.lstm(x)
-        out = self.fc(h_n[-1])
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
         return out
 
-lstm_model = LSTMClassifier(1, 64, 1, len(label_encoder.classes_))
-lstm_model.load_state_dict(torch.load("model/lstm_model.pth"))
+# Load LSTM model
+lstm_model = LSTMModel()
+lstm_model.load_state_dict(torch.load(LSTM_MODEL_PATH))
 lstm_model.eval()
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 lstm_model.to(device)
 
-# Ensure static directory exists
-if not os.path.exists('static'):
-    os.makedirs('static')
-
-# Check if visualizations exist to avoid regenerating
-def generate_visualizations():
-    if not all(os.path.exists(f'static/{img}') for img in ['histogram.png', 'crop_dist.png', 'heatmap.png']):
-        # Create and save histogram
-        fig, axes = plt.subplots(3, 3, figsize=(12, 8))
-        axes = axes.flatten()
-        for i, col in enumerate(df.drop('label', axis=1).columns):
-            axes[i].hist(df[col], bins=20, color='#4CAF50', edgecolor='black')
-            axes[i].set_title(col, fontsize=10)
-        plt.tight_layout()
-        plt.savefig('static/histogram.png', dpi=150, bbox_inches='tight')
-        plt.close(fig)  # Explicitly close the figure
-
-        # Crop distribution
-        fig = plt.figure(figsize=(12, 6))
-        sns.countplot(y='label', data=df, order=df['label'].value_counts().index, palette='viridis')
-        plt.title("Crop Distribution", fontsize=14, pad=10)
-        plt.xlabel("Count", fontsize=12)
-        plt.ylabel("Crop", fontsize=12)
-        plt.tight_layout()
-        plt.savefig('static/crop_dist.png', dpi=150, bbox_inches='tight')
-        plt.close(fig)  # Explicitly close the figure
-
-        # Heatmap
-        fig = plt.figure(figsize=(10, 8))
-        sns.heatmap(df.drop("label", axis=1).corr(), annot=True, cmap="coolwarm", fmt=".2f", annot_kws={"size": 10})
-        plt.title("Feature Correlation Heatmap", fontsize=14, pad=10)
-        plt.tight_layout()
-        plt.savefig('static/heatmap.png', dpi=150, bbox_inches='tight')
-        plt.close(fig)  # Explicitly close the figure
-
-@app.route('/')
-def home():
-    return render_template("index.html")
-
-@app.route('/visualize')
-def visualize():
-    generate_visualizations()  # Generate visualizations only if they don't exist
-    return render_template("visualize.html")
-
+# Prediction endpoint
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
+        # Get JSON data from request
         data = request.get_json()
-        N = float(data['N'])
-        P = float(data['P'])
-        K = float(data['K'])
-        temperature = float(data['temperature'])
-        humidity = float(data['humidity'])
-        ph = float(data['ph'])
-        rainfall = float(data['rainfall'])
-        model_type = data['model']
-
-        features = [N, P, K, temperature, humidity, ph, rainfall]
-        scaled = scaler.transform([features])
-
-        if model_type == "rf":
-            pred = rf_model.predict(scaled)[0]
-            crop = label_encoder.inverse_transform([pred])[0]
+        required_fields = ['N', 'P', 'K', 'temperature', 'humidity', 'ph', 'rainfall', 'model']
+        if not all(field in data for field in required_fields):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        # Extract features and model type
+        features = np.array([[data['N'], data['P'], data['K'], data['temperature'], 
+                             data['humidity'], data['ph'], data['rainfall']]], dtype=float)
+        model_type = data['model'].lower()
+        
+        # Validate model type
+        if model_type not in ['rf', 'lstm']:
+            return jsonify({'error': 'Invalid model type. Use "rf" or "lstm"'}), 400
+        
+        # Preprocess input
+        features_scaled = scaler.transform(features)
+        
+        # Make prediction
+        if model_type == 'rf':
+            # Random Forest prediction
+            pred_proba = rf_model.predict_proba(features_scaled)[0]
+            pred_class = rf_model.predict(features_scaled)[0]
         else:
-            tensor_input = torch.tensor(scaled.reshape(1, 7, 1), dtype=torch.float32).to(device)
+            # LSTM prediction
+            features_tensor = torch.FloatTensor(features_scaled).reshape(1, 1, -1).to(device)
             with torch.no_grad():
-                output = lstm_model(tensor_input)
-                _, pred = torch.max(output, 1)
-                crop = label_encoder.inverse_transform([pred.cpu().item()])[0]
-
-        return {"recommended_crop": crop}
+                output = lstm_model(features_tensor)
+                pred_proba = torch.softmax(output, dim=1).cpu().numpy()[0]
+                pred_class = torch.argmax(output, dim=1).cpu().numpy()[0]
+        
+        # Decode prediction
+        predicted_crop = label_encoder.inverse_transform([pred_class])[0]
+        confidence = float(np.max(pred_proba))
+        
+        # Return response
+        return jsonify({
+            'prediction': predicted_crop,
+            'confidence': confidence
+        })
+    
     except Exception as e:
-        return {"error": str(e)}, 400
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
