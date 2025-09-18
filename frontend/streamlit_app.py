@@ -1,6 +1,17 @@
 import streamlit as st
 import requests
 import pandas as pd
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Get API_URL from environment variables
+API_URL = os.getenv("API_URL")
+if not API_URL:
+    st.error("API_URL not found in .env file. Please set it and restart the app.")
+    st.stop()
 
 # Page config
 st.set_page_config(page_title="Crop Recommendation System", page_icon="🌱", layout="wide")
@@ -26,9 +37,6 @@ rainfall = st.sidebar.slider("Rainfall (mm)", 0.0, 500.0, 200.0)
 
 # Model selection
 model_type = st.sidebar.selectbox("Select Model", ["rf", "lstm"])
-
-# API URL (update with your deployed backend URL, e.g., Render URL)
-API_URL = "http://127.0.0.1:5000/predict"  # Change to your Render backend URL after deployment
 
 # Prediction button
 if st.sidebar.button("Predict Crop", type="primary"):

@@ -1,0 +1,7 @@
+__pycache__/
+.env
+*.pyc
+models/*.pkl
+models/*.pth  # Commit models or use Render's file upload if large".env" 
+".env" 
+".env" 

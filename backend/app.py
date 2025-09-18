@@ -6,9 +6,9 @@ import pickle
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 import torch.nn as nn
 import os
-
-# Initialize Flask app
+from flask_cors import CORS
 app = Flask(__name__)
+CORS(app)  # Add after app initialization
 
 # Define paths to model files in the models/ subdirectory
 MODEL_DIR = 'models'
